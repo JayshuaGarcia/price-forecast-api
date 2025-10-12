@@ -477,3 +477,5 @@ To update the API with new data:
 
 🌟 **Quick Start**: `uvicorn main:app --reload` → http://localhost:8000/docs
 
+📅 **Last Updated**: October 2025
+
