@@ -5,6 +5,9 @@ from prophet import Prophet
 import numpy as np
 import json
 from datetime import datetime, timedelta
+import os
+import pickle
+from pathlib import Path
 
 app = FastAPI()
 
@@ -19,6 +22,41 @@ app.add_middleware(
 
 # --- Load Excel Data ---
 FILE_PATH = "All Pricing Daily.xlsx"
+MODEL_DIR = Path("models")
+MODEL_DIR.mkdir(exist_ok=True)
+
+def _slugify(value: str) -> str:
+    return (
+        "".join(ch if ch.isalnum() else "_" for ch in value.lower())
+        .strip("_")
+        .replace("__", "_")
+    )
+
+def _model_path_for(commodity: str) -> Path:
+    return MODEL_DIR / f"prophet_{_slugify(commodity)}.pkl"
+
+def _is_model_fresh(model_path: Path) -> bool:
+    if not model_path.exists():
+        return False
+    data_mtime = Path(FILE_PATH).stat().st_mtime
+    model_mtime = model_path.stat().st_mtime
+    return model_mtime >= data_mtime
+
+def _prepare_prophet_dataframe(history_df: pd.DataFrame) -> pd.DataFrame:
+    return history_df[["date", "amount"]].rename(columns={"date": "ds", "amount": "y"}).dropna()
+
+def _fit_prophet(history_df: pd.DataFrame) -> Prophet:
+    forecast_df = _prepare_prophet_dataframe(history_df)
+    if len(forecast_df) < 2:
+        raise Exception("Not enough data after cleaning")
+    model = Prophet(
+        yearly_seasonality=False,
+        weekly_seasonality=False,
+        daily_seasonality=False,
+        seasonality_mode='multiplicative'
+    )
+    model.fit(forecast_df)
+    return model
 
 def load_data():
     df = pd.read_excel(FILE_PATH)
@@ -179,25 +217,19 @@ def forecast_price(commodity: str, days: int):
         if len(recent_data) < 2:
             return {"error": f"Not enough valid data for '{commodity}' after outlier removal"}
 
-        # Try Prophet first, fall back to simple forecasting if it fails
+        # Try cached Prophet model first; fall back to fit-on-the-fly; else simple forecast
         try:
+            model_path = _model_path_for(commodity)
+            model: Prophet | None = None
+            if _is_model_fresh(model_path):
+                with open(model_path, "rb") as f:
+                    model = pickle.load(f)
+            else:
+                model = _fit_prophet(recent_data)
+                with open(model_path, "wb") as f:
+                    pickle.dump(model, f)
             # Prepare for Prophet
-            forecast_df = recent_data[['date', 'amount']].rename(columns={'date': 'ds', 'amount': 'y'})
-            
-            # Remove any remaining NaN values
-            forecast_df = forecast_df.dropna()
-            
-            if len(forecast_df) < 2:
-                raise Exception("Not enough data after cleaning")
-
-            # Configure Prophet with simpler settings for better stability
-            model = Prophet(
-                yearly_seasonality=False,
-                weekly_seasonality=False,
-                daily_seasonality=False,
-                seasonality_mode='multiplicative'
-            )
-            model.fit(forecast_df)
+            forecast_df = _prepare_prophet_dataframe(recent_data)
 
             future = model.make_future_dataframe(periods=days)
             forecast = model.predict(future)
@@ -295,8 +327,27 @@ def extended_forecast_price(commodity: str, months: int):
         if len(historical_data) < 30:  # Need at least a month of data for extended forecasts
             return {"error": f"Not enough valid historical data for '{commodity}' extended forecast (need at least 30 days)"}
 
-        # Use enhanced simple forecasting for extended periods
-        forecasts = simple_forecast(historical_data, days)
+        # Prefer cached (or freshly-fit) Prophet model for extended periods
+        try:
+            model_path = _model_path_for(commodity)
+            model: Prophet | None = None
+            if _is_model_fresh(model_path):
+                with open(model_path, "rb") as f:
+                    model = pickle.load(f)
+            else:
+                model = _fit_prophet(historical_data)
+                with open(model_path, "wb") as f:
+                    pickle.dump(model, f)
+
+            forecast_df = _prepare_prophet_dataframe(historical_data)
+            future = model.make_future_dataframe(periods=days)
+            forecast = model.predict(future)
+            result = forecast[['ds', 'yhat', 'yhat_lower', 'yhat_upper']].tail(days)
+            forecasts = clean_data_for_json(result.to_dict(orient='records'))
+            method_used = "prophet_cached"
+        except Exception:
+            forecasts = simple_forecast(historical_data, days)
+            method_used = "extended_linear_with_seasonality"
         
         if not forecasts:
             return {"error": f"Extended forecasting failed for '{commodity}'"}
@@ -321,7 +372,7 @@ def extended_forecast_price(commodity: str, months: int):
             "forecast_period_months": months,
             "forecast_period_days": days,
             "forecast": forecasts, 
-            "method": "extended_linear_with_seasonality",
+            "method": method_used,
             "monthly_summary": monthly_summary,
             "data_points_used": len(historical_data),
             "note": "Extended forecasts use enhanced linear modeling with seasonal adjustments and increased uncertainty bounds for longer periods"
@@ -580,3 +631,46 @@ def forecast_weekly(commodity: str, months: int):
         
     except Exception as e:
         return {"error": f"Failed to generate weekly forecast: {str(e)}"}
+
+# --- Offline training endpoints ---
+@app.post("/train/{commodity}")
+def train_single_commodity(commodity: str):
+    try:
+        df = load_data()
+        filtered = df[df['commodity'].str.contains(commodity, case=False, na=False)]
+        if filtered.empty:
+            return {"error": f"No data found for '{commodity}'"}
+        daily_avg = filtered.groupby('date')['amount'].mean().reset_index().sort_values('date')
+        # Use up to last 2 years for robustness
+        history = daily_avg.tail(730)
+        model = _fit_prophet(history)
+        path = _model_path_for(commodity)
+        with open(path, "wb") as f:
+            pickle.dump(model, f)
+        return {"status": "trained", "commodity": commodity, "model_path": str(path), "rows_used": int(len(history))}
+    except Exception as e:
+        return {"error": f"Failed to train model: {str(e)}"}
+
+@app.post("/train-all")
+def train_all():
+    try:
+        df = load_data()
+        results = []
+        for commodity in sorted(df['commodity'].unique().tolist()):
+            try:
+                filtered = df[df['commodity'] == commodity]
+                daily_avg = filtered.groupby('date')['amount'].mean().reset_index().sort_values('date')
+                history = daily_avg.tail(730)
+                if len(history) < 2:
+                    results.append({"commodity": commodity, "status": "skipped", "reason": "not_enough_data"})
+                    continue
+                model = _fit_prophet(history)
+                path = _model_path_for(commodity)
+                with open(path, "wb") as f:
+                    pickle.dump(model, f)
+                results.append({"commodity": commodity, "status": "trained", "rows_used": int(len(history))})
+            except Exception as inner_e:
+                results.append({"commodity": commodity, "status": "failed", "error": str(inner_e)})
+        return {"summary": results, "model_dir": str(MODEL_DIR)}
+    except Exception as e:
+        return {"error": f"Failed to train all models: {str(e)}"}
