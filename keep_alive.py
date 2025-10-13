@@ -10,7 +10,7 @@ import schedule
 from datetime import datetime
 
 # Your deployed API URL (replace with your actual Render URL)
-API_URL = "https://price-forecast-api.onrender.com"  # Update this after deployment
+API_URL = "https://price-forecast-api.onrender.com"  # Update this with your actual Render URL after deployment
 
 def ping_api():
     """Ping the API to keep it awake"""

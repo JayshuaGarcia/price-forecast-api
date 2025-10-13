@@ -143,7 +143,30 @@ def simple_forecast(data, days):
 
 @app.get("/")
 def root():
-    return {"message": "Price Forecast API - Forecasting Only"}
+    return {"message": "Price Forecast API running!"}
+
+# --- Endpoint: View all previous prices ---
+@app.get("/history")
+def get_history():
+    try:
+        df = load_data()
+        # Return ALL records from the Excel file
+        data = df.to_dict(orient="records")
+        return clean_data_for_json(data)
+    except Exception as e:
+        return {"error": f"Failed to load data: {str(e)}"}
+
+# --- Endpoint: View recent prices (limited to 1000 records) ---
+@app.get("/history/recent")
+def get_recent_history():
+    try:
+        df = load_data()
+        # Limit to recent data to avoid overwhelming response
+        df = df.tail(1000)  # Last 1000 records
+        data = df.to_dict(orient="records")
+        return clean_data_for_json(data)
+    except Exception as e:
+        return {"error": f"Failed to load data: {str(e)}"}
 
 # --- Endpoint: Get available commodities ---
 @app.get("/commodities")
@@ -155,7 +178,7 @@ def get_commodities():
     except Exception as e:
         return {"error": f"Failed to load commodities: {str(e)}"}
 
-# --- Endpoint: Daily forecast for next days (up to 365 days) ---
+# --- Endpoint: Forecast for next days (up to 365 days) ---
 @app.get("/forecast/{commodity}/{days}")
 def forecast_price(commodity: str, days: int):
     try:
@@ -230,6 +253,38 @@ def forecast_price(commodity: str, days: int):
         
     except Exception as e:
         return {"error": f"Failed to generate forecast: {str(e)}"}
+
+# --- Endpoint: Get commodity details ---
+@app.get("/commodity/{commodity}")
+def get_commodity_details(commodity: str):
+    try:
+        df = load_data()
+        filtered = df[df['commodity'].str.contains(commodity, case=False, na=False)]
+        
+        if filtered.empty:
+            return {"error": f"No data found for '{commodity}'"}
+        
+        # Get basic stats
+        stats = {
+            "commodity": commodity,
+            "total_records": len(filtered),
+            "date_range": {
+                "earliest": filtered['date'].min().isoformat(),
+                "latest": filtered['date'].max().isoformat()
+            },
+            "price_stats": {
+                "min": float(filtered['amount'].min()),
+                "max": float(filtered['amount'].max()),
+                "avg": float(filtered['amount'].mean()),
+                "median": float(filtered['amount'].median())
+            },
+            "types": filtered['type'].unique().tolist()
+        }
+        
+        return clean_data_for_json(stats)
+        
+    except Exception as e:
+        return {"error": f"Failed to get commodity details: {str(e)}"}
 
 # --- Endpoint: Extended forecast for longer periods (6 months to 2 years) ---
 @app.get("/extended-forecast/{commodity}/{months}")
@@ -325,6 +380,145 @@ def extended_forecast_price(commodity: str, months: int):
         
     except Exception as e:
         return {"error": f"Failed to generate extended forecast: {str(e)}"}
+
+# --- Endpoint: Get forecast summary with multiple time horizons ---
+@app.get("/forecast-summary/{commodity}")
+def forecast_summary(commodity: str):
+    try:
+        # Get short-term (30 days), medium-term (90 days), and long-term (180 days) forecasts
+        short_term = forecast_price(commodity, 30)
+        medium_term = forecast_price(commodity, 90)
+        long_term = extended_forecast_price(commodity, 6)  # 6 months
+        
+        return {
+            "commodity": commodity,
+            "short_term_30_days": short_term,
+            "medium_term_90_days": medium_term,
+            "long_term_6_months": long_term,
+            "summary": {
+                "short_term_trend": "Up" if short_term.get('forecast') and len(short_term['forecast']) > 1 and short_term['forecast'][-1]['yhat'] > short_term['forecast'][0]['yhat'] else "Down",
+                "medium_term_trend": "Up" if medium_term.get('forecast') and len(medium_term['forecast']) > 1 and medium_term['forecast'][-1]['yhat'] > medium_term['forecast'][0]['yhat'] else "Down",
+                "long_term_trend": "Up" if long_term.get('forecast') and len(long_term['forecast']) > 1 and long_term['forecast'][-1]['yhat'] > long_term['forecast'][0]['yhat'] else "Down"
+            }
+        }
+        
+    except Exception as e:
+        return {"error": f"Failed to generate forecast summary: {str(e)}"}
+
+# --- Endpoint: Get all data statistics ---
+@app.get("/data-stats")
+def get_data_statistics():
+    try:
+        df = load_data()
+        
+        stats = {
+            "total_records": len(df),
+            "total_commodities": df['commodity'].nunique(),
+            "total_types": df['type'].nunique(),
+            "date_range": {
+                "earliest": df['date'].min().isoformat(),
+                "latest": df['date'].max().isoformat()
+            },
+            "commodities_summary": [],
+            "types_summary": []
+        }
+        
+        # Commodity summary
+        commodity_counts = df['commodity'].value_counts()
+        for commodity, count in commodity_counts.head(10).items():
+            stats["commodities_summary"].append({
+                "commodity": commodity,
+                "record_count": int(count),
+                "date_range": {
+                    "earliest": df[df['commodity'] == commodity]['date'].min().isoformat(),
+                    "latest": df[df['commodity'] == commodity]['date'].max().isoformat()
+                }
+            })
+        
+        # Type summary
+        type_counts = df['type'].value_counts()
+        for type_name, count in type_counts.head(10).items():
+            stats["types_summary"].append({
+                "type": type_name,
+                "record_count": int(count),
+                "price_range": {
+                    "min": float(df[df['type'] == type_name]['amount'].min()),
+                    "max": float(df[df['type'] == type_name]['amount'].max()),
+                    "avg": float(df[df['type'] == type_name]['amount'].mean())
+                }
+            })
+        
+        return clean_data_for_json(stats)
+        
+    except Exception as e:
+        return {"error": f"Failed to get data statistics: {str(e)}"}
+
+# --- Endpoint: Get all data for a specific commodity ---
+@app.get("/commodity/{commodity}/all-data")
+def get_commodity_all_data(commodity: str):
+    try:
+        df = load_data()
+        
+        # Filter for the commodity
+        filtered = df[df['commodity'].str.contains(commodity, case=False, na=False)]
+        
+        if filtered.empty:
+            return {"error": f"No data found for '{commodity}'"}
+        
+        # Sort by date
+        filtered = filtered.sort_values('date')
+        
+        data = filtered.to_dict(orient="records")
+        return clean_data_for_json(data)
+        
+    except Exception as e:
+        return {"error": f"Failed to get commodity data: {str(e)}"}
+
+# --- Endpoint: Get all data for a specific type ---
+@app.get("/type/{type_name}/all-data")
+def get_type_all_data(type_name: str):
+    try:
+        df = load_data()
+        
+        # Filter for the type
+        filtered = df[df['type'].str.contains(type_name, case=False, na=False)]
+        
+        if filtered.empty:
+            return {"error": f"No data found for type '{type_name}'"}
+        
+        # Sort by date
+        filtered = filtered.sort_values('date')
+        
+        data = filtered.to_dict(orient="records")
+        return clean_data_for_json(data)
+        
+    except Exception as e:
+        return {"error": f"Failed to get type data: {str(e)}"}
+
+# --- Endpoint: Search data by date range ---
+@app.get("/data/date-range/{start_date}/{end_date}")
+def get_data_by_date_range(start_date: str, end_date: str):
+    try:
+        df = load_data()
+        
+        # Convert string dates to datetime
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
+        
+        # Filter by date range
+        filtered = df[(df['date'] >= start_dt) & (df['date'] <= end_dt)]
+        
+        if filtered.empty:
+            return {"error": f"No data found between {start_date} and {end_date}"}
+        
+        # Sort by date
+        filtered = filtered.sort_values('date')
+        
+        data = filtered.to_dict(orient="records")
+        return clean_data_for_json(data)
+        
+    except Exception as e:
+        return {"error": f"Failed to get data by date range: {str(e)}"}
 
 # --- Endpoint: Weekly forecast for multiple months ---
 @app.get("/forecast-weekly/{commodity}/{months}")
