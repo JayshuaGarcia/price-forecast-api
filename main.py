@@ -20,10 +20,22 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Load Excel Data ---
+# --- Load Data ---
 FILE_PATH = "All Pricing Daily.xlsx"
+JSON_FILE_PATH = "pricing_data.json"
 MODEL_DIR = Path("models")
 MODEL_DIR.mkdir(exist_ok=True)
+
+# Commodity name mappings for app compatibility
+COMMODITY_MAPPINGS = {
+    "BENTENG BIGAS MERON NA": "KADIWA RICE-FOR-ALL",
+    "benteng bigas meron na": "KADIWA RICE-FOR-ALL",
+    "Benteng Bigas Meron Na": "KADIWA RICE-FOR-ALL",
+    "KADIWA": "KADIWA RICE-FOR-ALL",
+    "kadiwa": "KADIWA RICE-FOR-ALL",
+    "rice": "LOCAL COMMERCIAL RICE",  # Default rice mapping
+    "RICE": "LOCAL COMMERCIAL RICE"
+}
 
 def _slugify(value: str) -> str:
     return (
@@ -58,27 +70,62 @@ def _fit_prophet(history_df: pd.DataFrame) -> Prophet:
     model.fit(forecast_df)
     return model
 
+def load_json_data():
+    """Load data from JSON file for better performance"""
+    try:
+        import json
+        with open(JSON_FILE_PATH, 'r', encoding='utf-8') as f:
+            return json.load(f)
+    except FileNotFoundError:
+        print(f"Warning: {JSON_FILE_PATH} not found, falling back to Excel")
+        return None
+    except Exception as e:
+        print(f"Error loading JSON: {e}, falling back to Excel")
+        return None
+
+def map_commodity_name(commodity_name):
+    """Map app commodity names to actual data commodity names"""
+    return COMMODITY_MAPPINGS.get(commodity_name, commodity_name)
+
 def load_data():
-    df = pd.read_excel(FILE_PATH)
-    # Convert column names to lowercase and replace spaces with underscores
-    df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+    """Load data from JSON if available, otherwise from Excel"""
+    json_data = load_json_data()
     
-    # Check for required columns
-    required_columns = ['commodity', 'date', 'amount']
-    missing_columns = [col for col in required_columns if col not in df.columns]
-    if missing_columns:
-        raise Exception(f"Missing required columns: {missing_columns}. Available columns: {df.columns.tolist()}")
-    
-    # Convert date column to datetime if it's not already
-    df['date'] = pd.to_datetime(df['date'])
-    
-    # Convert amount column to numeric, handling any non-numeric values
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-    
-    # Remove rows with NaN values in critical columns
-    df = df.dropna(subset=['commodity', 'date', 'amount'])
-    
-    return df
+    if json_data:
+        # Convert JSON data to DataFrame format
+        records = []
+        for commodity, data in json_data['commodities'].items():
+            for price_data in data['daily_prices']:
+                records.append({
+                    'commodity': commodity,
+                    'date': pd.to_datetime(price_data['date']),
+                    'amount': price_data['price']
+                })
+        
+        df = pd.DataFrame(records)
+        return df
+    else:
+        # Fallback to Excel loading
+        df = pd.read_excel(FILE_PATH)
+        # Convert column names to lowercase and replace spaces with underscores
+        df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+        
+        # Check for required columns
+        required_columns = ['commodity', 'date', 'amount']
+        missing_columns = [col for col in required_columns if col not in df.columns]
+        if missing_columns:
+            raise Exception(f"Missing required columns: {missing_columns}. Available columns: {df.columns.tolist()}")
+        
+        # Convert date column to datetime if it's not already
+        df['date'] = pd.to_datetime(df['date'])
+        
+        # Convert amount column to numeric, handling any non-numeric values
+        df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
+        
+        # Remove rows with NaN values in critical columns
+        df = df.dropna(subset=['commodity', 'date', 'amount'])
+        
+        return df
 
 def clean_data_for_json(data):
     """Clean data to ensure JSON serialization works properly"""
@@ -251,10 +298,12 @@ def forecast_price(commodity: str, days: int):
         if days > 365:
             return {"error": "Maximum forecast period is 365 days. Use /extended-forecast for longer periods."}
             
+        # Map commodity name to actual data name
+        mapped_commodity = map_commodity_name(commodity)
         df = load_data()
 
         # Filter only the selected commodity
-        filtered = df[df['commodity'].str.contains(commodity, case=False, na=False)]
+        filtered = df[df['commodity'].str.contains(mapped_commodity, case=False, na=False)]
 
         if filtered.empty:
             return {"error": f"No data found for '{commodity}'"}
@@ -429,10 +478,12 @@ def forecast_weekly(commodity: str, months: int):
         days = months * 30  # Approximate days in months
         weeks = (days // 7) + 1  # Number of weeks
         
+        # Map commodity name to actual data name
+        mapped_commodity = map_commodity_name(commodity)
         df = load_data()
 
         # Filter only the selected commodity
-        filtered = df[df['commodity'].str.contains(commodity, case=False, na=False)]
+        filtered = df[df['commodity'].str.contains(mapped_commodity, case=False, na=False)]
 
         if filtered.empty:
             return {"error": f"No data found for '{commodity}'"}
