@@ -97,48 +97,131 @@ def clean_data_for_json(data):
     else:
         return data
 
-def simple_forecast(data, days):
-    """Enhanced simple forecasting with seasonal adjustment for longer periods"""
+def analyze_commodity_patterns(data, commodity_name):
+    """Analyze actual patterns in commodity data"""
+    if len(data) < 10:
+        return None
+    
+    # Get recent data (last 6 months)
+    recent_date = data['date'].max() - timedelta(days=180)
+    recent_data = data[data['date'] >= recent_date].copy()
+    
+    if len(recent_data) < 5:
+        recent_data = data.tail(30).copy()
+    
+    # Calculate actual statistics
+    avg_price = recent_data['amount'].mean()
+    price_std = recent_data['amount'].std()
+    min_price = recent_data['amount'].min()
+    max_price = recent_data['amount'].max()
+    
+    # Calculate actual trend
+    daily_avg = recent_data.groupby('date')['amount'].mean().reset_index().sort_values('date')
+    if len(daily_avg) >= 2:
+        first_price = daily_avg['amount'].iloc[0]
+        last_price = daily_avg['amount'].iloc[-1]
+        trend_percent = ((last_price - first_price) / first_price) * 100 if first_price > 0 else 0
+        trend_direction = "increasing" if trend_percent > 1 else "decreasing" if trend_percent < -1 else "stable"
+    else:
+        trend_percent = 0
+        trend_direction = "stable"
+    
+    # Calculate volatility
+    price_changes = daily_avg['amount'].diff().dropna()
+    volatility = price_changes.std() if len(price_changes) > 0 else price_std * 0.1
+    
+    return {
+        'avg_price': avg_price,
+        'price_std': price_std,
+        'min_price': min_price,
+        'max_price': max_price,
+        'trend_percent': trend_percent,
+        'trend_direction': trend_direction,
+        'volatility': volatility,
+        'data_points': len(recent_data),
+        'recent_prices': daily_avg['amount'].tail(10).tolist()
+    }
+
+def realistic_forecast(data, days, commodity_name):
+    """Generate realistic forecasts based on actual data patterns"""
     if len(data) < 2:
         return []
     
-    # Calculate simple linear trend
-    x = np.arange(len(data))
-    y = data['amount'].values
+    # Analyze actual patterns
+    patterns = analyze_commodity_patterns(data, commodity_name)
+    if not patterns:
+        return []
     
-    # Linear regression
-    coeffs = np.polyfit(x, y, 1)
-    trend = coeffs[0]
-    
-    # Calculate volatility and seasonal patterns for longer forecasts
-    std_dev = np.std(y[-30:]) if len(y) >= 30 else np.std(y)
-    
-    # For longer forecasts, increase uncertainty bounds
-    uncertainty_multiplier = min(1.0 + (days / 365.0) * 0.5, 2.0)  # Max 2x uncertainty for 1+ year forecasts
-    
-    # Get last date
+    # Get last date and price
     last_date = data['date'].iloc[-1]
+    last_price = data['amount'].iloc[-1]
+    
+    # Use actual patterns for forecasting
+    base_price = patterns['avg_price']
+    volatility = patterns['volatility']
+    trend_percent = patterns['trend_percent']
+    
+    # Adjust base price based on recent trend
+    trend_adjustment = (trend_percent / 100) * base_price
     
     forecasts = []
     for i in range(1, days + 1):
         future_date = last_date + timedelta(days=i)
         
-        # Basic linear trend
-        predicted_value = y[-1] + (trend * i)
+        # Calculate realistic price based on actual patterns
+        # Use trend but keep it within reasonable bounds
+        trend_factor = trend_adjustment * (i / 30)  # Apply trend over time
         
-        # Add some seasonal-like variation for longer forecasts (simple sine wave)
-        if days > 30:
-            seasonal_factor = 0.02 * np.sin(2 * np.pi * i / 365)  # Annual seasonality
-            predicted_value += seasonal_factor * y[-1]
+        # Add realistic variation based on actual volatility
+        random_variation = np.random.normal(0, volatility * 0.5)
         
-        # Increase uncertainty for longer forecasts
-        adjusted_std_dev = std_dev * uncertainty_multiplier * (1 + i / 365.0)
+        # Calculate predicted price
+        predicted_value = base_price + trend_factor + random_variation
+        
+        # Ensure price stays within realistic bounds (based on historical data)
+        min_bound = max(patterns['min_price'] * 0.8, 1.0)  # At least ₱1, but not below 80% of historical min
+        max_bound = patterns['max_price'] * 1.2  # Not more than 120% of historical max
+        
+        predicted_value = max(min_bound, min(predicted_value, max_bound))
+        
+        # Calculate confidence intervals based on actual volatility
+        confidence_range = volatility * (1 + i / 30)  # Slightly increase uncertainty over time
         
         forecast = {
             'ds': future_date.strftime('%Y-%m-%d'),
-            'yhat': max(0, predicted_value),  # Ensure non-negative prices
-            'yhat_lower': max(0, predicted_value - 1.96 * adjusted_std_dev),
-            'yhat_upper': max(0, predicted_value + 1.96 * adjusted_std_dev)
+            'yhat': round(predicted_value, 2),
+            'yhat_lower': max(min_bound, round(predicted_value - 1.5 * confidence_range, 2)),
+            'yhat_upper': min(max_bound, round(predicted_value + 1.5 * confidence_range, 2))
+        }
+        forecasts.append(forecast)
+    
+    return forecasts
+
+def simple_forecast(data, days):
+    """Fallback simple forecasting for when realistic forecasting fails"""
+    if len(data) < 2:
+        return []
+    
+    # Use the last known price as base
+    last_price = data['amount'].iloc[-1]
+    last_date = data['date'].iloc[-1]
+    
+    # Calculate volatility from recent data
+    recent_prices = data['amount'].tail(30)
+    volatility = recent_prices.std() if len(recent_prices) > 1 else last_price * 0.05
+    
+    forecasts = []
+    for i in range(1, days + 1):
+        future_date = last_date + timedelta(days=i)
+        
+        # Very conservative forecast - stay close to last price
+        predicted_value = last_price + np.random.normal(0, volatility * 0.1)
+        
+        forecast = {
+            'ds': future_date.strftime('%Y-%m-%d'),
+            'yhat': round(max(0, predicted_value), 2),
+            'yhat_lower': round(max(0, predicted_value - volatility), 2),
+            'yhat_upper': round(predicted_value + volatility, 2)
         }
         forecasts.append(forecast)
     
@@ -224,12 +307,16 @@ def forecast_price(commodity: str, days: int):
             return {"commodity": commodity, "forecast": cleaned_result, "method": "prophet"}
             
         except Exception as prophet_error:
-            # Fall back to simple forecasting
-            forecasts = simple_forecast(recent_data, days)
+            # Fall back to realistic forecasting based on actual patterns
+            forecasts = realistic_forecast(recent_data, days, commodity)
             if not forecasts:
-                return {"error": f"Both Prophet and simple forecasting failed for '{commodity}'"}
+                # Final fallback to simple forecasting
+                forecasts = simple_forecast(recent_data, days)
+                if not forecasts:
+                    return {"error": f"All forecasting methods failed for '{commodity}'"}
+                return {"commodity": commodity, "forecast": forecasts, "method": "simple_linear", "prophet_error": str(prophet_error)}
             
-            return {"commodity": commodity, "forecast": forecasts, "method": "simple_linear", "prophet_error": str(prophet_error)}
+            return {"commodity": commodity, "forecast": forecasts, "method": "realistic_pattern_based", "prophet_error": str(prophet_error)}
         
     except Exception as e:
         return {"error": f"Failed to generate forecast: {str(e)}"}
@@ -371,8 +458,11 @@ def forecast_weekly(commodity: str, months: int):
         if len(historical_data) < 7:
             return {"error": f"Not enough valid historical data for '{commodity}' weekly forecast"}
 
-        # Generate daily forecasts first
-        daily_forecasts = simple_forecast(historical_data, days)
+        # Generate daily forecasts using realistic pattern-based forecasting
+        daily_forecasts = realistic_forecast(historical_data, days, commodity)
+        if not daily_forecasts:
+            # Fallback to simple forecasting
+            daily_forecasts = simple_forecast(historical_data, days)
         
         if not daily_forecasts:
             return {"error": f"Weekly forecasting failed for '{commodity}'"}
@@ -434,7 +524,7 @@ def forecast_weekly(commodity: str, months: int):
                 "min_weekly_avg": round(min(all_avg_prices), 2),
                 "max_weekly_avg": round(max(all_avg_prices), 2)
             },
-            "method": "enhanced_linear_with_seasonal_adjustment",
+            "method": "realistic_pattern_based_forecasting",
             "data_points_used": len(historical_data)
         }
         
