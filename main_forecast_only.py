@@ -72,9 +72,6 @@ def load_data():
     # Convert date column to datetime if it's not already
     df['date'] = pd.to_datetime(df['date'])
     
-    # Convert amount column to numeric, handling any non-numeric values
-    df['amount'] = pd.to_numeric(df['amount'], errors='coerce')
-    
     # Remove rows with NaN values in critical columns
     df = df.dropna(subset=['commodity', 'date', 'amount'])
     
@@ -483,3 +480,4 @@ def train_all():
         return {"summary": results, "model_dir": str(MODEL_DIR)}
     except Exception as e:
         return {"error": f"Failed to train all models: {str(e)}"}
+
