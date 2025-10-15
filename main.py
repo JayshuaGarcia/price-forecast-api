@@ -146,7 +146,7 @@ def simple_forecast(data, days):
 
 @app.get("/")
 def root():
-    return {"message": "Price Forecast API - Forecasting Only"}
+    return {"message": "Price Forecast API - Forecasting Only", "version": "2.0", "data_updated": "2025-10-15"}
 
 # --- Endpoint: Get available commodities ---
 @app.get("/commodities")
